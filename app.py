@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 
 app = Flask(__name__)
 
-# 💡 센스 만점 퀵 서치 (한국 주식 + 자주 찾는 미국 주식 한글화)
+# 💡 센스 만점 퀵 서치 (가장 자주 보는 거나 미국 주식 한글 패치만 남겨둠)
 quick_search = {
     "삼성전자": "005930",
     "에스엠": "041510",
@@ -18,25 +18,21 @@ quick_search = {
 }
 
 def find_kr_stock_code(name):
-    """네이버 금융 검색을 이용해 0.1초 만에 종목 코드 알아내기 (방화벽 절대 안 막힘!)"""
+    """네이버 금융 '자동완성 API'를 써서 0.01초 만에 코드 훔쳐오기 (막힐 일 절대 없음!)"""
+    url = f"https://ac.finance.naver.com/ac?q={name}&q_enc=utf-8&st=111&r_format=json&r_enc=utf-8"
     try:
-        # 한글을 네이버가 인식하는 euc-kr 방식으로 변환해서 검색 쏩니다!
-        encoded_name = urllib.parse.quote(name.encode('euc-kr'))
-        url = f"https://finance.naver.com/search/searchList.naver?query={encoded_name}"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        
-        # 검색하면 네이버가 알아서 해당 주식 페이지로 쓩 이동시켜줌
-        res = requests.get(url, headers=headers)
-        
-        # 최종 도착한 주소에 'code=숫자6자리'가 있으면 종목 찾기 성공!
-        if 'code=' in res.url:
-            return res.url.split('code=')[-1][:6]
+        res = requests.get(url, timeout=3)
+        data = res.json()
+        items = data.get('items', [])
+        # 검색 결과가 있으면 첫 번째 종목의 6자리 코드를 바로 가져옴
+        if items and len(items[0]) > 0:
+            return items[0][0][1]
     except:
         pass
     return None
 
 def get_kr_price_naver(code):
-    """찾아낸 코드로 가격만 쏙 빼오기"""
+    """찾아낸 6자리 코드로 가격만 쏙 빼오기"""
     url = f"https://finance.naver.com/item/main.naver?code={code}"
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
@@ -61,7 +57,7 @@ def stock_bot():
         # 1. 퀵 서치 주머니에서 먼저 확인
         if user_msg in quick_search:
             code_or_ticker = quick_search[user_msg]
-            if code_or_ticker.isalpha():  # 영어(알파벳)면 미국 주식
+            if code_or_ticker.isalpha():  # 영어면 미국 주식
                 ticker = yf.Ticker(code_or_ticker).history(period="1d")
                 price = f"${ticker['Close'].iloc[0]:.2f}"
                 res_text = f"🇺🇸 {user_msg}({code_or_ticker}) 현재가: {price}"
@@ -70,14 +66,14 @@ def stock_bot():
                 res_text = f"🇰🇷 {user_msg}({code_or_ticker}) 현재가: {price}"
         
         else:
-            # 2. 주머니에 없으면 네이버 검색으로 한국 주식 찾기!
+            # 2. 네이버 자동완성 API로 '모든' 한국 주식 알아서 다 찾기!
             kr_code = find_kr_stock_code(user_msg)
             
             if kr_code:
                 price = get_kr_price_naver(kr_code)
                 res_text = f"🇰🇷 {user_msg} ({kr_code})\n💰 현재가: {price}"
             else:
-                # 3. 네이버 검색에도 안 나오면 미국 주식(티커)으로 시도
+                # 3. 그래도 없으면 미국 주식(티커)으로 시도
                 ticker = yf.Ticker(user_msg).history(period="1d")
                 if not ticker.empty:
                     price = f"${ticker['Close'].iloc[0]:.2f}"
