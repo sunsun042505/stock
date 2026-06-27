@@ -1,7 +1,7 @@
 Flask==3.0.0
-pykrx==1.0.44
 yfinance==0.2.33
 beautifulsoup4==4.12.2
 requests==2.31.0
 gunicorn==21.2.0
 setuptools
+finance-datareader
