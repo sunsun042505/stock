@@ -11,20 +11,22 @@ app = Flask(__name__)
 # ---------------------------------------------------------
 def search_and_get_price(keyword):
     try:
-        # (1) 네이버 금융 검색으로 6자리 종목 코드 알아내기
-        # 한글 이름을 EUC-KR로 변환해서 네이버에 검색
-        enc_keyword = urllib.parse.quote(keyword.encode('euc-kr'))
-        search_url = f"https://finance.naver.com/search/searchList.naver?query={enc_keyword}"
-        search_res = requests.get(search_url)
+        # 1. 네이버 증권 자동완성 API (이게 진짜 빠르고 정확함)
+        # 띄어쓰기나 인코딩 문제 없이 깔끔하게 JSON으로 종목 코드를 찾아줌
+        search_url = f"https://ac.finance.naver.com/ac?q={keyword}&q_enc=utf-8&st=111&frm=stock&r_format=json&r_enc=utf-8&r_unicode=1&t_kcond=0&l_type=2"
         
-        # HTML 결과에서 'code=숫자6자리' 패턴 찾기
-        match = re.search(r'code=(\d{6})', search_res.text)
-        if not match:
-            return f"❌ '{keyword}' 종목을 찾을 수 없어. (정확한 이름을 입력해 줘!)"
+        search_res = requests.get(search_url).json()
+        items = search_res.get('items', [])
         
-        code = match.group(1)
+        # 검색 결과가 비어있으면 에러 메시지
+        if not items or not items[0]:
+            return f"❌ '{keyword}' 종목을 찾을 수 없어. (이름을 확인해 줘!)"
+            
+        # 첫 번째 검색 결과의 [이름, 종목코드] 가져오기
+        first_result = items[0][0]
+        code = first_result[1]  # '005930' 같은 6자리 코드
         
-        # (2) 알아낸 코드로 모바일 API 찔러서 가격 가져오기
+        # 2. 알아낸 코드로 모바일 API 찔러서 가격 가져오기
         price_url = f"https://m.stock.naver.com/api/stock/{code}/integration"
         headers = {
             'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15'
@@ -38,7 +40,9 @@ def search_and_get_price(keyword):
         return f"📊 {name} ({code})\n현재가: {price}원\n전일대비: {diff}원"
         
     except Exception as e:
-        return f"❌ 검색 중 에러가 발생했어!"
+        print(f"에러 로그: {e}")
+        return f"❌ '{keyword}' 검색 중 에러가 발생했어!"
+
 
 # ---------------------------------------------------------
 # 2. 백그라운드 작업 (크롤링 + 카카오톡 발송)
