@@ -1,75 +1,72 @@
-import requests
-import json
-import threading
 from flask import Flask, request, jsonify
+import requests
+import threading
 
 app = Flask(__name__)
 
-# 실제 네이버에서 주가와 뉴스를 긁어서 카카오 콜백 주소로 보내는 함수 (백그라운드에서 실행)
-def fetch_data_and_callback(callback_url, stock_code):
-    try:
-        # 1. 우리가 저번에 성공했던 네이버 모바일 API로 주가 긁기
-        url = f"https://m.stock.naver.com/api/stock/{stock_code}/integration"
-        headers = {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X)'}
-        response = requests.get(url, headers=headers)
-        data = response.json()
-        
-        name = data['stockName']
-        price = data['totalInfos']['closePrice']
-        diff = data['totalInfos']['compareToPreviousClosePrice']
-        
-        message_text = f"📊 요청하신 {name} 시황이야!\n현재가: {price}원\n전일대비: {diff}"
-        
-    except Exception as e:
-        message_text = f"😢 시황 정보를 가져오는데 실패했어: {e}"
+# ---------------------------------------------------------
+# 1. 백그라운드에서 실행될 실제 작업 (크롤링 + 카카오톡 발송)
+# ---------------------------------------------------------
+def process_crawling_and_send(callback_url):
+    print("✅ 데이터 수집 스레드 시작!")
     
-    # 2. 카카오가 기다리고 있는 콜백 주소로 결과 메시지 쏘기
-    callback_payload = {
+    # 여기서 네이버 증권 데이터 긁어오기 (아까 짠 코드 활용)
+    # KOSPI 긁어오기
+    # KOSDAQ 긁어오기
+    # 삼성전자 가격 긁어오기 등등...
+    
+    # 긁어왔다고 가정하고 결과 텍스트 만들기
+    result_text = "📊 오늘의 증시 요약\n코스피: 2,750.31\n코스닥: 852.42\n삼성전자: 81,000원"
+    
+    # 콜백 형식에 맞춘 카카오톡 응답 JSON 만들기
+    payload = {
         "version": "2.0",
         "template": {
             "outputs": [
                 {
                     "simpleText": {
-                        "text": message_text
+                        "text": result_text
                     }
                 }
             ]
         }
     }
     
-    # 카카오 서버로 결과 전송!
-    requests.post(callback_url, json=callback_payload)
+    # 카카오가 알려준 callback_url로 데이터를 쏴줌!
+    headers = {'Content-Type': 'application/json; charset=utf-8'}
+    res = requests.post(callback_url, json=payload, headers=headers)
+    print(f"✅ 콜백 응답 발송 완료 (상태 코드: {res.status_code})")
 
-# 카카오톡 챗봇이 버튼 클릭 시 처음으로 찌르는 주소
-@app.route('/chatbot', methods=['POST'])
-def chatbot_handler():
+
+# ---------------------------------------------------------
+# 2. 챗봇 요청을 받는 메인 라우트 (여긴 1초 안에 끝남)
+# ---------------------------------------------------------
+@app.route('/api/chatbot', methods=['POST'])
+def chatbot_api():
     req_data = request.get_json()
     
-    # 카카오가 준 요청에서 콜백 주소 꺼내기
-    callback_url = req_data.get('userRequest', {}).get('callbackUrl')
-    
-    # 사용자가 입력한 종목 코드 (예: 삼성전자 005930)
-    # 버튼 설정에 따라 변수 가져오는 방식은 다를 수 있어!
-    stock_code = "005930" 
+    # 카카오가 넘겨준 정보에서 'callbackUrl' 쏙 빼오기
+    user_request = req_data.get('userRequest', {})
+    callback_url = user_request.get('callbackUrl')
     
     if callback_url:
-        # 핵심!! 데이터 긁는 함수를 '쓰레드(Thread)'로 돌려서 백그라운드에서 일하게 만듦
-        # 이렇게 하면 이 함수가 끝나길 기다리지 않고 바로 아래 return으로 넘어가!
-        threading.Thread(target=fetch_data_and_callback, args=(callback_url, stock_code)).start()
+        print(f"🔗 콜백 URL 수신 완료: {callback_url}")
         
-        # 카카오한테 0.1초 만에 "나 지금 준비 중이야!" 하고 먼저 응답 던지기
-        # 카카오는 이 응답을 받으면 5초 타임아웃을 안 내고 대기 상태로 들어감
-        return jsonify({
-            "version": "2.0",
-            "useCallback": True  # 카카오한테 콜백 쓸 테니까 기다리라고 말해주는 플래그
-        })
-    
+        # 스레드(Thread)를 만들어서 백그라운드로 크롤링 작업 던지기
+        # 이러면 메인 흐름은 크롤링을 안 기다리고 밑으로 바로 내려감!
+        task = threading.Thread(target=process_crawling_and_send, args=(callback_url,))
+        task.start()
+        
+        # 카카오한테 "어 땡큐! 수집해서 나중에 줄게!" 하고 바로 응답 (타임아웃 방어 성공!)
+        return jsonify({"useCallback": True})
+        
     else:
-        # 혹시 콜백 주소가 안 넘어왔을 때의 예외 처리
+        # 혹시 챗봇 빌더에서 콜백 옵션을 안 켜서 URL이 안 왔을 때의 에러 처리
+        print("❌ 콜백 URL이 없습니다. 챗봇 빌더 설정을 확인하세요.")
         return jsonify({
             "version": "2.0",
             "template": {
-                "outputs": [{"simpleText": {"text": "콜백 주소를 찾을 수 없어."}}]
+                "outputs": [{"simpleText": {"text": "서버 설정에 문제가 있습니다. (콜백 URL 누락)"}}]
             }
         })
 
