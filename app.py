@@ -1,101 +1,72 @@
-import requests
-import re
-import urllib.parse
+import os
 from flask import Flask, request, jsonify
-import threading
+import yfinance as yf
+import FinanceDataReader as fdr
+import requests
 
 app = Flask(__name__)
 
-# ---------------------------------------------------------
-# 1. 사용자가 친 '이름'을 '6자리 코드'로 찾고 가격까지 가져오는 만능 함수
-# ---------------------------------------------------------
-def search_and_get_price(keyword):
+# 💡 마법의 공간: 서버가 켜질 때 전체 주식 목록 2,800개를 미리 외워둠
+print("⏳ 한국 주식 전체 데이터 가져오는 중...")
+try:
+    df_krx = fdr.StockListing('KRX')
+    kr_stocks_cache = {}
+    for idx, row in df_krx.iterrows():
+        name = row['Name']
+        code = row['Code']  # 6자리 종목코드 (예: 005930)
+        kr_stocks_cache[name] = code
+    print(f"✅ 한국 주식 {len(kr_stocks_cache)}개 완벽하게 맵핑 완료!")
+except Exception as e:
+    kr_stocks_cache = {}
+    print(f"🚨 로딩 실패: {e}")
+
+def get_kr_price_naver_mobile(code):
+    """네이버 모바일 전용 API: 방화벽 절대 안 막히고 엄청 빠름!"""
+    url = f"https://m.stock.naver.com/api/stock/{code}/price?pageSize=1&page=1"
+    headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        # 1. 네이버 증권 자동완성 API (이게 진짜 빠르고 정확함)
-        # 띄어쓰기나 인코딩 문제 없이 깔끔하게 JSON으로 종목 코드를 찾아줌
-        search_url = f"https://ac.finance.naver.com/ac?q={keyword}&q_enc=utf-8&st=111&frm=stock&r_format=json&r_enc=utf-8&r_unicode=1&t_kcond=0&l_type=2"
-        
-        search_res = requests.get(search_url).json()
-        items = search_res.get('items', [])
-        
-        # 검색 결과가 비어있으면 에러 메시지
-        if not items or not items[0]:
-            return f"❌ '{keyword}' 종목을 찾을 수 없어. (이름을 확인해 줘!)"
-            
-        # 첫 번째 검색 결과의 [이름, 종목코드] 가져오기
-        first_result = items[0][0]
-        code = first_result[1]  # '005930' 같은 6자리 코드
-        
-        # 2. 알아낸 코드로 모바일 API 찔러서 가격 가져오기
-        price_url = f"https://m.stock.naver.com/api/stock/{code}/integration"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15'
-        }
-        price_res = requests.get(price_url, headers=headers).json()
-        
-        name = price_res['stockName']
-        price = price_res['totalInfos']['closePrice']
-        diff = price_res['totalInfos']['compareToPreviousClosePrice']
-        
-        return f"📊 {name} ({code})\n현재가: {price}원\n전일대비: {diff}원"
-        
-    except Exception as e:
-        print(f"에러 로그: {e}")
-        return f"❌ '{keyword}' 검색 중 에러가 발생했어!"
+        res = requests.get(url, headers=headers, timeout=3)
+        data = res.json()
+        price = data[0]['closePrice'] # JSON에서 종가만 쏙 빼오기
+        return f"{price}원"
+    except:
+        return "가격 정보 로딩 실패"
 
-
-# ---------------------------------------------------------
-# 2. 백그라운드 작업 (크롤링 + 카카오톡 발송)
-# ---------------------------------------------------------
-def process_crawling_and_send(callback_url, user_text):
-    print(f"✅ 사용자가 입력한 검색어: {user_text}")
-    
-    # 여기서 유저가 친 텍스트로 주식 검색!
-    result_text = search_and_get_price(user_text)
-    
-    # 카카오 콜백 형식에 맞춘 JSON
-    payload = {
-        "version": "2.0",
-        "template": {
-            "outputs": [
-                {
-                    "simpleText": {
-                        "text": result_text
-                    }
-                }
-            ]
-        }
-    }
-    
-    headers = {'Content-Type': 'application/json; charset=utf-8'}
-    requests.post(callback_url, json=payload, headers=headers)
-    print("✅ 콜백 응답 발송 완료")
-
-# ---------------------------------------------------------
-# 3. 메인 라우트
-# ---------------------------------------------------------
 @app.route('/api/stock', methods=['POST'])
-def chatbot_api():
-    req_data = request.get_json()
-    
-    user_request = req_data.get('userRequest', {})
-    callback_url = user_request.get('callbackUrl')
-    
-    # 💡 여기가 핵심! 사용자가 카톡 창에 입력한 텍스트를 가져옴
-    utterance = user_request.get('utterance', '').strip()
-    
-    if callback_url:
-        # 스레드에 콜백 주소랑 '사용자가 입력한 단어(utterance)'를 같이 넘겨줌
-        task = threading.Thread(target=process_crawling_and_send, args=(callback_url, utterance))
-        task.start()
+def stock_bot():
+    try:
+        req = request.get_json()
+        user_msg = req.get('userRequest', {}).get('utterance', '').strip()
         
-        return jsonify({"useCallback": True})
-    else:
+        if not user_msg:
+            return jsonify({"version": "2.0", "template": {"outputs": [{"simpleText": {"text": "메시지를 읽지 못했어요."}}]}})
+
+        res_text = ""
+
+        # 1. 한국 주식인지 확인
+        if user_msg in kr_stocks_cache:
+            code = kr_stocks_cache[user_msg]
+            price = get_kr_price_naver_mobile(code)  # 야후 버리고 네이버 모바일 API 사용!
+            res_text = f"🇰🇷 {user_msg}\n💰 현재가: {price}"
+                
+        else:
+            # 2. 한국 주식에 없으면 미국 주식(yfinance)으로 검색
+            ticker_data = yf.Ticker(user_msg).history(period="1d")
+            if not ticker_data.empty:
+                price = float(ticker_data['Close'].iloc[-1])
+                res_text = f"🇺🇸 {user_msg} 현재가: ${price:.2f}"
+            else:
+                res_text = f"🧐 '{user_msg}' 종목을 찾지 못했어요.\n(미국 주식은 AAPL처럼 영어 티커로 입력해 줘!)"
+
         return jsonify({
             "version": "2.0",
-            "template": {
-                "outputs": [{"simpleText": {"text": "콜백 설정이 안 켜져 있어!"}}]
-            }
+            "template": {"outputs": [{"simpleText": {"text": res_text}}]}
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "version": "2.0",
+            "template": {"outputs": [{"simpleText": {"text": f"🚨 봇 오류 발생: {str(e)}"}}]}
         })
 
 if __name__ == '__main__':
