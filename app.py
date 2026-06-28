@@ -1,24 +1,55 @@
-from flask import Flask, request, jsonify
 import requests
+import re
+import urllib.parse
+from flask import Flask, request, jsonify
 import threading
 
 app = Flask(__name__)
 
 # ---------------------------------------------------------
-# 1. 백그라운드에서 실행될 실제 작업 (크롤링 + 카카오톡 발송)
+# 1. 사용자가 친 '이름'을 '6자리 코드'로 찾고 가격까지 가져오는 만능 함수
 # ---------------------------------------------------------
-def process_crawling_and_send(callback_url):
-    print("✅ 데이터 수집 스레드 시작!")
+def search_and_get_price(keyword):
+    try:
+        # (1) 네이버 금융 검색으로 6자리 종목 코드 알아내기
+        # 한글 이름을 EUC-KR로 변환해서 네이버에 검색
+        enc_keyword = urllib.parse.quote(keyword.encode('euc-kr'))
+        search_url = f"https://finance.naver.com/search/searchList.naver?query={enc_keyword}"
+        search_res = requests.get(search_url)
+        
+        # HTML 결과에서 'code=숫자6자리' 패턴 찾기
+        match = re.search(r'code=(\d{6})', search_res.text)
+        if not match:
+            return f"❌ '{keyword}' 종목을 찾을 수 없어. (정확한 이름을 입력해 줘!)"
+        
+        code = match.group(1)
+        
+        # (2) 알아낸 코드로 모바일 API 찔러서 가격 가져오기
+        price_url = f"https://m.stock.naver.com/api/stock/{code}/integration"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15'
+        }
+        price_res = requests.get(price_url, headers=headers).json()
+        
+        name = price_res['stockName']
+        price = price_res['totalInfos']['closePrice']
+        diff = price_res['totalInfos']['compareToPreviousClosePrice']
+        
+        return f"📊 {name} ({code})\n현재가: {price}원\n전일대비: {diff}원"
+        
+    except Exception as e:
+        return f"❌ 검색 중 에러가 발생했어!"
+
+# ---------------------------------------------------------
+# 2. 백그라운드 작업 (크롤링 + 카카오톡 발송)
+# ---------------------------------------------------------
+def process_crawling_and_send(callback_url, user_text):
+    print(f"✅ 사용자가 입력한 검색어: {user_text}")
     
-    # 여기서 네이버 증권 데이터 긁어오기 (아까 짠 코드 활용)
-    # KOSPI 긁어오기
-    # KOSDAQ 긁어오기
-    # 삼성전자 가격 긁어오기 등등...
+    # 여기서 유저가 친 텍스트로 주식 검색!
+    result_text = search_and_get_price(user_text)
     
-    # 긁어왔다고 가정하고 결과 텍스트 만들기
-    result_text = "📊 오늘의 증시 요약\n코스피: 2,750.31\n코스닥: 852.42\n삼성전자: 81,000원"
-    
-    # 콜백 형식에 맞춘 카카오톡 응답 JSON 만들기
+    # 카카오 콜백 형식에 맞춘 JSON
     payload = {
         "version": "2.0",
         "template": {
@@ -32,41 +63,34 @@ def process_crawling_and_send(callback_url):
         }
     }
     
-    # 카카오가 알려준 callback_url로 데이터를 쏴줌!
     headers = {'Content-Type': 'application/json; charset=utf-8'}
-    res = requests.post(callback_url, json=payload, headers=headers)
-    print(f"✅ 콜백 응답 발송 완료 (상태 코드: {res.status_code})")
-
+    requests.post(callback_url, json=payload, headers=headers)
+    print("✅ 콜백 응답 발송 완료")
 
 # ---------------------------------------------------------
-# 2. 챗봇 요청을 받는 메인 라우트 (여긴 1초 안에 끝남)
+# 3. 메인 라우트
 # ---------------------------------------------------------
 @app.route('/api/stock', methods=['POST'])
 def chatbot_api():
     req_data = request.get_json()
     
-    # 카카오가 넘겨준 정보에서 'callbackUrl' 쏙 빼오기
     user_request = req_data.get('userRequest', {})
     callback_url = user_request.get('callbackUrl')
     
+    # 💡 여기가 핵심! 사용자가 카톡 창에 입력한 텍스트를 가져옴
+    utterance = user_request.get('utterance', '').strip()
+    
     if callback_url:
-        print(f"🔗 콜백 URL 수신 완료: {callback_url}")
-        
-        # 스레드(Thread)를 만들어서 백그라운드로 크롤링 작업 던지기
-        # 이러면 메인 흐름은 크롤링을 안 기다리고 밑으로 바로 내려감!
-        task = threading.Thread(target=process_crawling_and_send, args=(callback_url,))
+        # 스레드에 콜백 주소랑 '사용자가 입력한 단어(utterance)'를 같이 넘겨줌
+        task = threading.Thread(target=process_crawling_and_send, args=(callback_url, utterance))
         task.start()
         
-        # 카카오한테 "어 땡큐! 수집해서 나중에 줄게!" 하고 바로 응답 (타임아웃 방어 성공!)
         return jsonify({"useCallback": True})
-        
     else:
-        # 혹시 챗봇 빌더에서 콜백 옵션을 안 켜서 URL이 안 왔을 때의 에러 처리
-        print("❌ 콜백 URL이 없습니다. 챗봇 빌더 설정을 확인하세요.")
         return jsonify({
             "version": "2.0",
             "template": {
-                "outputs": [{"simpleText": {"text": "서버 설정에 문제가 있습니다. (콜백 URL 누락)"}}]
+                "outputs": [{"simpleText": {"text": "콜백 설정이 안 켜져 있어!"}}]
             }
         })
 
