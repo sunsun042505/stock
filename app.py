@@ -41,7 +41,7 @@ def process_crawling_and_send(callback_url):
 # ---------------------------------------------------------
 # 2. 챗봇 요청을 받는 메인 라우트 (여긴 1초 안에 끝남)
 # ---------------------------------------------------------
-@app.route('/api/chatbot', methods=['POST'])
+@app.route('/api/stock', methods=['POST'])
 def chatbot_api():
     req_data = request.get_json()
     
